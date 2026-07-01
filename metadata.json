@@ -1,0 +1,6 @@
+{
+  "name": "Anti-Fraud Class Attendance System",
+  "description": "Secure attendance tracking with geofencing, dynamic time-synced QR codes, and emotion-based facial liveness detection.",
+  "requestFramePermissions": ["camera", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
