@@ -57,6 +57,13 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'lecturer' | 'student' | 'system-docs'>('lecturer');
   const [lecturerSubTab, setLecturerSubTab] = useState<'onboard' | 'session' | 'logs'>('session');
 
+  // --- Auth States ---
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
+  const [userRole, setUserRole] = useState<'lecturer' | 'student' | null>(null);
+  const [loginId, setLoginId] = useState<string>('');
+  const [loginPassword, setLoginPassword] = useState<string>('');
+  const [loginError, setLoginError] = useState<string>('');
+
   // --- Database States (Simulated SQLite) ---
   const [students, setStudents] = useState<Student[]>([
     { studentId: "STU202601", name: "Alex Mercer", encryptedFaceVector: "Enc(AES-256)[0.124, -0.452, 0.892...]", status: "ACTIVE" },
@@ -95,6 +102,30 @@ export default function App() {
   const [isGpsLoading, setIsGpsLoading] = useState<boolean>(false);
   const [gpsError, setGpsError] = useState<string>("");
   const [studentIdInput, setStudentIdInput] = useState<string>("");
+  
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError('');
+    if (loginId.toLowerCase() === 'lecturer' && loginPassword === 'password') {
+      setIsLoggedIn(true);
+      setUserRole('lecturer');
+      setActiveTab('lecturer');
+    } else if (loginId.toUpperCase().startsWith('STU') && loginPassword === 'password') {
+      setIsLoggedIn(true);
+      setUserRole('student');
+      setActiveTab('student');
+      setStudentIdInput(loginId.toUpperCase());
+    } else {
+      setLoginError('Invalid credentials. Use "lecturer" / "password" or "STU..." / "password".');
+    }
+  };
+
+  const handleLogout = () => {
+    setIsLoggedIn(false);
+    setUserRole(null);
+    setLoginId('');
+    setLoginPassword('');
+  };
   
   // Student Face Check states
   const [studentScanStep, setStudentScanStep] = useState<'qr' | 'location' | 'face-auth' | 'success' | 'failed'>('qr');
@@ -360,63 +391,113 @@ export default function App() {
           </div>
 
           {/* Quick Stats/Flags */}
-          <div className="flex items-center gap-3 text-xs font-mono">
-            <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl text-emerald-400">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              Onboarded: {students.length}
+          {isLoggedIn && userRole === 'lecturer' && (
+            <div className="flex items-center gap-3 text-xs font-mono">
+              <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl text-emerald-400">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                Onboarded: {students.length}
+              </div>
+              <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl text-rose-400">
+                <span className="w-2 h-2 rounded-full bg-rose-400"></span>
+                Fraud Logs: {fraudLogs.length}
+              </div>
+              <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl text-cyan-400">
+                QR Sync: 15s Interval
+              </div>
             </div>
-            <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl text-rose-400">
-              <span className="w-2 h-2 rounded-full bg-rose-400"></span>
-              Fraud Logs: {fraudLogs.length}
-            </div>
-            <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl text-cyan-400">
-              QR Sync: 15s Interval
-            </div>
-          </div>
+          )}
+          {isLoggedIn && (
+            <button 
+              onClick={handleLogout}
+              className="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2 rounded-xl text-xs font-semibold text-white uppercase tracking-wider transition-all"
+            >
+              Logout
+            </button>
+          )}
         </div>
       </header>
 
       <div className="max-w-7xl mx-auto px-6 py-4">
         
+        {!isLoggedIn ? (
+          <div className="max-w-md mx-auto mt-12 bg-white/5 border border-white/10 rounded-3xl p-8 shadow-2xl relative overflow-hidden backdrop-blur-xl">
+            <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-cyan-500 to-blue-500"></div>
+            <div className="text-center mb-8">
+              <ShieldCheck className="w-12 h-12 text-cyan-400 mx-auto mb-4" />
+              <h2 className="text-2xl font-bold text-white uppercase tracking-wider">System Portal Login</h2>
+              <p className="text-xs text-slate-400 mt-2">Enter credentials to access AegisAttendance</p>
+            </div>
+            
+            <form onSubmit={handleLogin} className="space-y-5">
+              {loginError && (
+                <div className="bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs p-3 rounded-xl font-mono">
+                  {loginError}
+                </div>
+              )}
+              <div className="space-y-2">
+                <label className="text-xs font-mono uppercase tracking-wider text-slate-400">User ID</label>
+                <input 
+                  type="text" 
+                  value={loginId}
+                  onChange={(e) => setLoginId(e.target.value)}
+                  placeholder="e.g. lecturer or STU202601"
+                  className="w-full bg-black/45 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-cyan-500 transition-all placeholder:text-slate-600"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-mono uppercase tracking-wider text-slate-400">Password</label>
+                <input 
+                  type="password" 
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="Enter password (default: password)"
+                  className="w-full bg-black/45 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-cyan-500 transition-all placeholder:text-slate-600"
+                />
+              </div>
+              <button 
+                type="submit"
+                className="w-full bg-gradient-to-br from-cyan-500 to-blue-600 hover:opacity-90 text-white font-bold py-3.5 rounded-xl text-xs uppercase tracking-widest transition-all shadow-lg shadow-cyan-500/20"
+              >
+                Authenticate
+              </button>
+            </form>
+            <div className="mt-8 pt-6 border-t border-white/5 text-center text-[10px] text-slate-500 font-mono flex flex-col gap-2">
+              <span className="uppercase tracking-widest text-slate-400">Demo Credentials</span>
+              <p>Lecturer: <strong className="text-cyan-400">lecturer</strong> / <strong className="text-cyan-400">password</strong></p>
+              <p>Student: <strong className="text-emerald-400">STU202601</strong> / <strong className="text-emerald-400">password</strong></p>
+            </div>
+          </div>
+        ) : (
+          <>
         {/* Navigation Selector */}
-        <div className="flex border border-white/10 mb-8 p-1 bg-white/5 rounded-2xl max-w-lg backdrop-blur-xl shadow-lg shadow-black/30">
-          <button 
-            id="nav-lecturer-btn"
-            onClick={() => setActiveTab('lecturer')}
-            className={`flex-1 py-2.5 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-2 uppercase tracking-wider ${
-              activeTab === 'lecturer' 
-                ? 'bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/20 font-bold' 
-                : 'text-slate-400 hover:text-white hover:bg-white/5'
-            }`}
-          >
-            <Laptop className="w-4 h-4" />
-            Lecturer App
-          </button>
-          <button 
-            id="nav-student-btn"
-            onClick={() => setActiveTab('student')}
-            className={`flex-1 py-2.5 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-2 uppercase tracking-wider ${
-              activeTab === 'student' 
-                ? 'bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/20 font-bold' 
-                : 'text-slate-400 hover:text-white hover:bg-white/5'
-            }`}
-          >
-            <Smartphone className="w-4 h-4" />
-            Student App
-          </button>
-          <button 
-            id="nav-docs-btn"
-            onClick={() => setActiveTab('system-docs')}
-            className={`flex-1 py-2.5 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-2 uppercase tracking-wider ${
-              activeTab === 'system-docs' 
-                ? 'bg-white/10 text-white border border-white/10 shadow-sm font-bold' 
-                : 'text-slate-400 hover:text-white hover:bg-white/5'
-            }`}
-          >
-            <Database className="w-4 h-4" />
-            Backend Reference
-          </button>
-        </div>
+        {userRole === 'lecturer' && (
+          <div className="flex border border-white/10 mb-8 p-1 bg-white/5 rounded-2xl max-w-lg backdrop-blur-xl shadow-lg shadow-black/30">
+            <button 
+              id="nav-lecturer-btn"
+              onClick={() => setActiveTab('lecturer')}
+              className={`flex-1 py-2.5 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-2 uppercase tracking-wider ${
+                activeTab === 'lecturer' 
+                  ? 'bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/20 font-bold' 
+                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Laptop className="w-4 h-4" />
+              Lecturer App
+            </button>
+            <button 
+              id="nav-docs-btn"
+              onClick={() => setActiveTab('system-docs')}
+              className={`flex-1 py-2.5 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-2 uppercase tracking-wider ${
+                activeTab === 'system-docs' 
+                  ? 'bg-white/10 text-white border border-white/10 shadow-sm font-bold' 
+                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Database className="w-4 h-4" />
+              Backend Reference
+            </button>
+          </div>
+        )}
 
         {/* TAB 1: Lecturer App Interface */}
         {activeTab === 'lecturer' && (
@@ -1276,6 +1357,8 @@ export default function App() {
             </div>
           </div>
         )}
+        </>
+      )}
       </div>
 
       <footer className="border-t border-white/5 bg-[#030712]/50 backdrop-blur-md mt-16 py-8 text-center text-[10px] font-mono text-slate-500 uppercase tracking-widest">
