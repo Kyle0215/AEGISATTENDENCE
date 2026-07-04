@@ -63,6 +63,8 @@ export default function App() {
   const [loginId, setLoginId] = useState<string>('');
   const [loginPassword, setLoginPassword] = useState<string>('');
   const [loginError, setLoginError] = useState<string>('');
+  const [isSignUpMode, setIsSignUpMode] = useState<boolean>(false);
+  const [signUpRole, setSignUpRole] = useState<'student' | 'lecturer'>('student');
 
   // --- Database States (Simulated SQLite) ---
   const [students, setStudents] = useState<Student[]>([
@@ -106,6 +108,21 @@ export default function App() {
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
+
+    if (isSignUpMode) {
+      if (!loginId || !loginPassword) {
+        setLoginError('Please fill out all fields.');
+        return;
+      }
+      setIsLoggedIn(true);
+      setUserRole(signUpRole);
+      setActiveTab(signUpRole);
+      if (signUpRole === 'student') {
+        setStudentIdInput(loginId.toUpperCase());
+      }
+      return;
+    }
+
     if (loginId.toLowerCase() === 'lecturer' && loginPassword === 'password') {
       setIsLoggedIn(true);
       setUserRole('lecturer');
@@ -424,8 +441,8 @@ export default function App() {
             <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-cyan-500 to-blue-500"></div>
             <div className="text-center mb-8">
               <ShieldCheck className="w-12 h-12 text-cyan-400 mx-auto mb-4" />
-              <h2 className="text-2xl font-bold text-white uppercase tracking-wider">System Portal Login</h2>
-              <p className="text-xs text-slate-400 mt-2">Enter credentials to access AegisAttendance</p>
+              <h2 className="text-2xl font-bold text-white uppercase tracking-wider">{isSignUpMode ? 'Create Account' : 'System Portal Login'}</h2>
+              <p className="text-xs text-slate-400 mt-2">{isSignUpMode ? 'Register a new identity for AegisAttendance' : 'Enter credentials to access AegisAttendance'}</p>
             </div>
             
             <form onSubmit={handleLogin} className="space-y-5">
@@ -434,13 +451,34 @@ export default function App() {
                   {loginError}
                 </div>
               )}
+              {isSignUpMode && (
+                <div className="space-y-2">
+                  <label className="text-xs font-mono uppercase tracking-wider text-slate-400">Select Role</label>
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setSignUpRole('student')}
+                      className={`flex-1 py-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all border ${signUpRole === 'student' ? 'bg-cyan-500/20 border-cyan-500 text-cyan-400' : 'bg-black/45 border-white/10 text-slate-400'}`}
+                    >
+                      Student
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSignUpRole('lecturer')}
+                      className={`flex-1 py-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all border ${signUpRole === 'lecturer' ? 'bg-cyan-500/20 border-cyan-500 text-cyan-400' : 'bg-black/45 border-white/10 text-slate-400'}`}
+                    >
+                      Lecturer
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="space-y-2">
                 <label className="text-xs font-mono uppercase tracking-wider text-slate-400">User ID</label>
                 <input 
                   type="text" 
                   value={loginId}
                   onChange={(e) => setLoginId(e.target.value)}
-                  placeholder="e.g. lecturer or STU202601"
+                  placeholder={isSignUpMode ? (signUpRole === 'student' ? 'e.g. STU202602' : 'Choose a lecturer ID') : "e.g. lecturer or STU202601"}
                   className="w-full bg-black/45 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-cyan-500 transition-all placeholder:text-slate-600"
                 />
               </div>
@@ -450,7 +488,7 @@ export default function App() {
                   type="password" 
                   value={loginPassword}
                   onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder="Enter password (default: password)"
+                  placeholder={isSignUpMode ? "Create a password" : "Enter password (default: password)"}
                   className="w-full bg-black/45 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-cyan-500 transition-all placeholder:text-slate-600"
                 />
               </div>
@@ -458,14 +496,28 @@ export default function App() {
                 type="submit"
                 className="w-full bg-gradient-to-br from-cyan-500 to-blue-600 hover:opacity-90 text-white font-bold py-3.5 rounded-xl text-xs uppercase tracking-widest transition-all shadow-lg shadow-cyan-500/20"
               >
-                Authenticate
+                {isSignUpMode ? 'Register & Enter' : 'Authenticate'}
               </button>
             </form>
-            <div className="mt-8 pt-6 border-t border-white/5 text-center text-[10px] text-slate-500 font-mono flex flex-col gap-2">
-              <span className="uppercase tracking-widest text-slate-400">Demo Credentials</span>
-              <p>Lecturer: <strong className="text-cyan-400">lecturer</strong> / <strong className="text-cyan-400">password</strong></p>
-              <p>Student: <strong className="text-emerald-400">STU202601</strong> / <strong className="text-emerald-400">password</strong></p>
+            <div className="mt-6 text-center">
+              <button 
+                type="button" 
+                onClick={() => {
+                  setIsSignUpMode(!isSignUpMode);
+                  setLoginError('');
+                }}
+                className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors uppercase tracking-wider font-semibold"
+              >
+                {isSignUpMode ? 'Already have an account? Login' : 'Need an account? Sign Up'}
+              </button>
             </div>
+            {!isSignUpMode && (
+              <div className="mt-8 pt-6 border-t border-white/5 text-center text-[10px] text-slate-500 font-mono flex flex-col gap-2">
+                <span className="uppercase tracking-widest text-slate-400">Demo Credentials</span>
+                <p>Lecturer: <strong className="text-cyan-400">lecturer</strong> / <strong className="text-cyan-400">password</strong></p>
+                <p>Student: <strong className="text-emerald-400">STU202601</strong> / <strong className="text-emerald-400">password</strong></p>
+              </div>
+            )}
           </div>
         ) : (
           <>
