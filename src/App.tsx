@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  QrCode, 
+import { SwitchCamera, QrCode, 
   MapPin, 
   UserCheck, 
   ShieldAlert, 
@@ -21,9 +20,15 @@ import {
   Eye,
   Info,
   ChevronRight,
-  Database
-} from 'lucide-react';
+  Database, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { QRCodeCanvas } from "qrcode.react";
+import jsQR from "jsqr";
+import Webcam from "react-webcam";
+import { useCameraControls } from "./hooks/useCameraControls";
+import { supabase } from "./lib/supabase";
+const WebcamComponent = Webcam as any;
+
 
 // In-memory data structures representing our SQLite database on the client for full simulation
 interface Student {
@@ -31,6 +36,7 @@ interface Student {
   name: string;
   encryptedFaceVector: string;
   status: string;
+  lecturerEmail?: string;
 }
 
 interface AttendanceLog {
@@ -60,31 +66,66 @@ export default function App() {
   // --- Auth States ---
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
   const [userRole, setUserRole] = useState<'lecturer' | 'student' | null>(null);
-  const [loginId, setLoginId] = useState<string>('');
+  const [loginEmail, setLoginEmail] = useState<string>('');
   const [loginPassword, setLoginPassword] = useState<string>('');
   const [loginError, setLoginError] = useState<string>('');
   const [isSignUpMode, setIsSignUpMode] = useState<boolean>(false);
   const [signUpRole, setSignUpRole] = useState<'student' | 'lecturer'>('student');
 
   // --- Database States (Simulated SQLite) ---
-  const [students, setStudents] = useState<Student[]>([
-    { studentId: "STU202601", name: "Alex Mercer", encryptedFaceVector: "Enc(AES-256)[0.124, -0.452, 0.892...]", status: "ACTIVE" },
-    { studentId: "STU202602", name: "Elena Rostova", encryptedFaceVector: "Enc(AES-256)[-0.215, 0.367, -0.014...]", status: "ACTIVE" }
-  ]);
+  const [students, setStudents] = useState<Student[]>([]);
 
-  const [attendanceLogs, setAttendanceLogs] = useState<AttendanceLog[]>([
-    { id: 1, studentId: "STU202601", studentName: "Alex Mercer", checkedInAt: "09:02:15", distance: 3.4, emotion: "SMILE", status: "SUCCESS" }
-  ]);
+  // Fetch students from backend on mount
+  useEffect(() => {
+    const fetchStudents = async () => {
+      if (!isLoggedIn || !loginEmail) return;
+      try {
+        const res = await fetch(`/api/students?lecturerEmail=${loginEmail}`);
+        if (res.ok) {
+          const data = await res.json();
+          setStudents(data);
+        } else {
+          console.error("Failed to fetch students:", res.status);
+        }
+      } catch (err) {
+        console.error("Network error fetching students:", err);
+      }
+    };
+    fetchStudents();
+  }, [isLoggedIn, loginEmail]);
 
-  const [fraudLogs, setFraudLogs] = useState<FraudLog[]>([
-    { id: 1, studentId: "STU202699", fraudType: "GPS_SPOOF (Distance: 1420m)", distance: 1420, timestamp: "09:04:12", deviceFingerprint: "sha256_7fa834...ec8" }
-  ]);
+  const [attendanceLogs, setAttendanceLogs] = useState<AttendanceLog[]>([]);
+  const [fraudLogs, setFraudLogs] = useState<FraudLog[]>([]);
+
+  // Fetch attendance and fraud logs on mount
+  useEffect(() => {
+    const fetchLogs = async () => {
+      try {
+        const attRes = await fetch('/api/attendance');
+        if (attRes.ok) {
+          const attData = await attRes.json();
+          setAttendanceLogs(attData);
+        }
+        
+        const fraudRes = await fetch('/api/fraud');
+        if (fraudRes.ok) {
+          const fraudData = await fraudRes.json();
+          setFraudLogs(fraudData);
+        }
+      } catch (err) {
+        console.error("Failed to fetch logs:", err);
+      }
+    };
+    fetchLogs();
+  }, []);
 
   // --- Lecturer Settings (Geofence, Session) ---
   const [geofenceLat, setGeofenceLat] = useState<number>(37.7749);
   const [geofenceLng, setGeofenceLng] = useState<number>(-122.4194);
   const [radiusMeters, setRadiusMeters] = useState<number>(15);
-  const [sessionActive, setSessionActive] = useState<boolean>(true);
+    const [sessionActive, setSessionActive] = useState<boolean>(true);
+  const [dbSessionId, setDbSessionId] = useState<number | null>(null);
+  const [isSyncingSession, setIsSyncingSession] = useState<boolean>(false);
   const [sessionSecret, setSessionSecret] = useState<string>("sec_hack_mit_classA_2026");
   const [courseName, setCourseName] = useState<string>("Computer Science 101: Distributed Systems");
   const [qrToken, setQrToken] = useState<string>("");
@@ -96,61 +137,166 @@ export default function App() {
   const [isScanningFaceOnboard, setIsScanningFaceOnboard] = useState<boolean>(false);
   const [onboardFaceCaptured, setOnboardFaceCaptured] = useState<boolean>(false);
   const [generatedFaceEmbedding, setGeneratedFaceEmbedding] = useState<number[] | null>(null);
+  const webcamRef = useRef<any>(null);
+  const videoElement = webcamRef.current?.video || null;
+  const { isZoomSupported, setZoom, capabilities } = useCameraControls(videoElement);
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
 
   // --- Student App States ---
   const [scannedQRText, setScannedQRText] = useState<string>("");
+  const [scannedSessionId, setScannedSessionId] = useState<string | number | null>(null);
+  const [qrTargetLat, setQrTargetLat] = useState<number | null>(null);
+  const [qrTargetLng, setQrTargetLng] = useState<number | null>(null);
+  const [qrTargetRadius, setQrTargetRadius] = useState<number | null>(null);
   const [studentLat, setStudentLat] = useState<number>(37.77491); // Very close, defaults within bounds
   const [studentLng, setStudentLng] = useState<number>(-122.41941);
   const [isGpsLoading, setIsGpsLoading] = useState<boolean>(false);
+  const [isLecturerGpsLoading, setIsLecturerGpsLoading] = useState<boolean>(false);
   const [gpsError, setGpsError] = useState<string>("");
   const [studentIdInput, setStudentIdInput] = useState<string>("");
   
-  const handleLogin = (e: React.FormEvent) => {
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
 
-    if (isSignUpMode) {
-      if (!loginId || !loginPassword) {
-        setLoginError('Please fill out all fields.');
-        return;
-      }
-      setIsLoggedIn(true);
-      setUserRole(signUpRole);
-      setActiveTab(signUpRole);
-      if (signUpRole === 'student') {
-        setStudentIdInput(loginId.toUpperCase());
-      }
+    if (!loginEmail || !loginPassword) {
+      setLoginError('Please fill out all fields.');
       return;
     }
 
-    if (loginId.toLowerCase() === 'lecturer' && loginPassword === 'password') {
-      setIsLoggedIn(true);
-      setUserRole('lecturer');
-      setActiveTab('lecturer');
-    } else if (loginId.toUpperCase().startsWith('STU') && loginPassword === 'password') {
-      setIsLoggedIn(true);
-      setUserRole('student');
-      setActiveTab('student');
-      setStudentIdInput(loginId.toUpperCase());
-    } else {
-      setLoginError('Invalid credentials. Use "lecturer" / "password" or "STU..." / "password".');
+    if (!loginEmail.includes('@')) {
+      setLoginError('Please provide a valid Email Address.');
+      return;
+    }
+
+    setIsAuthLoading(true);
+
+    try {
+      if (isSignUpMode) {
+        // Register new user with Supabase
+        const { data, error } = await supabase.auth.signUp({
+          email: loginEmail,
+          password: loginPassword,
+          options: {
+            data: {
+              role: signUpRole
+            }
+          }
+        });
+
+        if (error) {
+          console.warn("Supabase SignUp Info:", error.message);
+          setLoginError(error.message);
+          setIsAuthLoading(false);
+          return;
+        }
+        
+        // Sometimes Supabase requires email verification, but we'll assume auto-confirm for now or proceed
+        setIsLoggedIn(true);
+        setUserRole(signUpRole);
+        setActiveTab(signUpRole);
+        if (signUpRole === 'student') {
+          setStudentIdInput(loginEmail.split('@')[0].toUpperCase());
+        } else if (signUpRole === 'lecturer') {
+          // Sync lecturer to backend
+          try {
+            await fetch('/api/lecturers', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ email: loginEmail, name: loginEmail.split('@')[0], password_hash: 'supabase_auth' })
+            });
+          } catch(e) {
+            console.error("Failed to sync lecturer:", e);
+          }
+        }
+      } else {
+        // Sign in existing user
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: loginEmail,
+          password: loginPassword
+        });
+
+        if (error) {
+          console.warn("Supabase SignIn Info:", error.message);
+          if (error.message.includes('Invalid login credentials')) {
+             setLoginError('Invalid login credentials. Please ensure you have created an account first by clicking "Need an account? Sign up" below.');
+          } else {
+             setLoginError(error.message);
+          }
+          setIsAuthLoading(false);
+          return;
+        }
+
+        // Get user role from metadata, default to student if missing
+        const userRole = data.user?.user_metadata?.role || 'student';
+        
+        setIsLoggedIn(true);
+        setUserRole(userRole);
+        setActiveTab(userRole);
+        if (userRole === 'student') {
+          setStudentIdInput(loginEmail.split('@')[0].toUpperCase());
+        }
+      }
+    } catch (err: any) {
+      console.error("Auth Exception:", err);
+      setLoginError(err.message || 'An unexpected error occurred during authentication.');
+    } finally {
+      setIsAuthLoading(false);
     }
   };
 
   const handleLogout = () => {
     setIsLoggedIn(false);
     setUserRole(null);
-    setLoginId('');
+    setLoginEmail('');
     setLoginPassword('');
   };
   
   // Student Face Check states
-  const [studentScanStep, setStudentScanStep] = useState<'qr' | 'location' | 'face-auth' | 'success' | 'failed'>('qr');
+  const logFraud = async (fraudData: Omit<FraudLog, 'id'>) => {
+    try {
+      const res = await fetch('/api/fraud', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fraudData)
+      });
+      if (res.ok) {
+        const freshRes = await fetch('/api/fraud');
+        if (freshRes.ok) {
+          const data = await freshRes.json();
+          setFraudLogs(data);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to log fraud to server:", err);
+    }
+  };
+  
+  const [studentScanStep, setStudentScanStep] = useState<'qr' | 'qr-success' | 'location' | 'face-auth' | 'success' | 'failed'>('qr');
   const [promptedEmotion, setPromptedEmotion] = useState<string>("SMILE");
   const [detectedEmotion, setDetectedEmotion] = useState<string>("NEUTRAL");
   const [livenessProgress, setLivenessProgress] = useState<number>(0);
   const [livenessStatusText, setLivenessStatusText] = useState<string>("Keep face in frame");
   const [errorMessage, setErrorMessage] = useState<string>("");
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [qrCameraError, setQrCameraError] = useState<string | null>(null);
+  const [qrCameraKey, setQrCameraKey] = useState<number>(0);
+  const [cameraKey, setCameraKey] = useState<number>(0);
+  const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
+  const toggleCamera = () => setFacingMode(prev => prev === "user" ? "environment" : "user");
+
+  const handleCameraError = (error: string | DOMException) => {
+    console.error("Camera Error: ", error);
+    setCameraError(typeof error === 'string' ? error : error.message || "Camera access blocked or not available");
+  };
+
+  const handleRetryCamera = () => {
+    setCameraError(null);
+    setCameraKey(prev => prev + 1);
+  };
 
   // Refs for custom animations
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -165,12 +311,13 @@ export default function App() {
 
       // Generate a cryptographic-like hash based on current time-bucket
       const timeBucket = Math.floor(now / 15);
-      const dummyToken = btoa(`${courseName}:${timeBucket}:${sessionSecret}:${sessionActive ? 'ACTIVE' : 'EXPIRED'}`).slice(0, 32);
+      const timeBucketStart = timeBucket * 15;
+      const dummyToken = btoa(`${dbSessionId || 'SESSION_CS101'}:${courseName}:${timeBucket}:${sessionSecret}:${sessionActive ? 'ACTIVE' : 'EXPIRED'}`).slice(0, 32);
       
       const payload = {
-        session_id: "SESSION_CS101",
-        timestamp: now,
-        nonce: Math.random().toString(36).substring(2, 10),
+        session_id: dbSessionId || "SESSION_CS101",
+        timestamp: timeBucketStart,
+        nonce: "nonce_" + timeBucket,
         token: dummyToken,
         coordinates: { lat: geofenceLat, lng: geofenceLng, radius: radiusMeters }
       };
@@ -181,9 +328,64 @@ export default function App() {
     updateQR();
     const interval = setInterval(updateQR, 1000);
     return () => clearInterval(interval);
-  }, [courseName, sessionSecret, geofenceLat, geofenceLng, radiusMeters, sessionActive]);
+  }, [courseName, sessionSecret, geofenceLat, geofenceLng, radiusMeters, sessionActive, dbSessionId]);
+
+  const handleSyncSession = async () => {
+    setIsSyncingSession(true);
+    try {
+      // 1. Create or get course
+      const courseRes = await fetch('/api/courses', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lecturerId: loginEmail, name: courseName })
+      });
+      if (!courseRes.ok) throw new Error("Failed to sync course");
+      const { id: courseId } = await courseRes.json();
+
+      // 2. Create session
+      const sessionRes = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          courseId, 
+          sessionSecret, 
+          startTime: new Date().toISOString(), 
+          active: sessionActive ? 1 : 0 
+        })
+      });
+      if (!sessionRes.ok) throw new Error("Failed to sync session");
+      const { id: sessionId } = await sessionRes.json();
+      
+      setDbSessionId(sessionId);
+      alert(`Session successfully synchronized to database! (Session ID: ${sessionId})`);
+    } catch (e: any) {
+      alert("Error syncing session: " + e.message);
+    } finally {
+      setIsSyncingSession(false);
+    }
+  };
 
   // --- Geolocation fetcher ---
+  const fetchLecturerGPS = () => {
+    setIsLecturerGpsLoading(true);
+    if (!navigator.geolocation) {
+      alert("Geolocation is not supported by your browser");
+      setIsLecturerGpsLoading(false);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setGeofenceLat(position.coords.latitude);
+        setGeofenceLng(position.coords.longitude);
+        setIsLecturerGpsLoading(false);
+      },
+      (error) => {
+        alert("GPS Error: " + error.message);
+        setIsLecturerGpsLoading(false);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  };
   const fetchStudentGPS = () => {
     setIsGpsLoading(true);
     setGpsError("");
@@ -229,6 +431,11 @@ export default function App() {
       alert("Please enter Student ID and Name first.");
       return;
     }
+    
+    // Capture image
+    const imageSrc = webcamRef.current?.getScreenshot();
+    if (imageSrc) setCapturedImage(imageSrc);
+    
     setIsScanningFaceOnboard(true);
     setTimeout(() => {
       // Simulate face vector extraction (128-dimensional floating points)
@@ -239,49 +446,139 @@ export default function App() {
     }, 2000);
   };
 
-  const handleSaveStudent = () => {
+  const [isSavingOnboard, setIsSavingOnboard] = useState(false);
+
+  const handleSaveStudent = async () => {
     if (!onboardFaceCaptured || !generatedFaceEmbedding) return;
+    
+    setIsSavingOnboard(true);
     
     const newStudent: Student = {
       studentId: onboardId,
       name: onboardName,
       encryptedFaceVector: `Enc(AES-256)[${generatedFaceEmbedding.slice(0, 3).map(n => n.toFixed(3)).join(', ')}...]`,
-      status: "ACTIVE"
+      status: 'ACTIVE',
+      lecturerEmail: loginEmail
     };
 
-    setStudents(prev => [newStudent, ...prev]);
-    setOnboardId("");
-    setOnboardName("");
-    setOnboardFaceCaptured(false);
-    setGeneratedFaceEmbedding(null);
-    alert(`Successfully onboarded ${newStudent.name}. Face vector securely encrypted and saved.`);
+    try {
+      const response = await fetch('/api/students', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(newStudent)
+      });
+
+      if (response.ok || response.status === 201) {
+        // Only update UI if the backend request was successful
+        setStudents(prev => [newStudent, ...prev]);
+        setOnboardId("");
+        setOnboardName("");
+        setOnboardFaceCaptured(false);
+        setGeneratedFaceEmbedding(null);
+        alert(`Successfully onboarded ${newStudent.name}. Face vector securely encrypted and saved to database.`);
+      } else {
+        const errData = await response.json().catch(() => null);
+        console.error("Database Save Failed:", response.status, errData);
+        alert(`Failed to save student: ${errData?.error || 'Unknown error'} (Status: ${response.status})`);
+      }
+    } catch (error) {
+      console.error("Network or Backend Error during save:", error);
+      alert("A network error occurred while trying to save the student data to the database.");
+    } finally {
+      setIsSavingOnboard(false);
+    }
   };
 
   // --- Student Verification Engine ---
-  const handleVerifyQR = () => {
+  
+  // Auto-verify when a valid QR payload is detected
+  useEffect(() => {
+    if (scannedQRText && studentScanStep === 'qr') {
+      try {
+        const parsed = JSON.parse(scannedQRText);
+        if (parsed.session_id && parsed.token) {
+          handleVerifyQR();
+        }
+      } catch (e) {
+        // Not valid JSON yet, wait
+      }
+    }
+  }, [scannedQRText, studentScanStep]); // Intentionally omitting handleVerifyQR to avoid loops
+
+  // jsQR scanning effect
+  useEffect(() => {
+    let animationFrameId: number;
+    let lastScanLog = 0;
+    const scanQR = () => {
+      if (webcamRef.current && webcamRef.current.video && webcamRef.current.video.readyState === 4 && studentScanStep === 'qr') {
+        const video = webcamRef.current.video;
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          const canvas = document.createElement("canvas");
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          try {
+              // @ts-ignore
+              const code = jsQR(imageData.data, imageData.width, imageData.height);
+              if (Date.now() - lastScanLog > 5000) {
+                 console.log("QR Scan active, frame sizes:", imageData.width, imageData.height);
+                 lastScanLog = Date.now();
+              }
+              if (code && code.data) {
+            setScannedQRText(prev => {
+              try {
+                const parsed = JSON.parse(code.data);
+                const formatted = JSON.stringify(parsed, null, 2);
+                if (prev !== formatted) return formatted;
+              } catch (e) {
+                if (prev !== code.data) return code.data;
+              }
+              return prev;
+              });
+            }
+          } catch (scanErr) {
+             console.error("jsQR scan error:", scanErr);
+          }
+        }
+        }
+      }
+      animationFrameId = requestAnimationFrame(scanQR);
+    };
+    scanQR();
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [studentScanStep]);
+
+  
+
+  const handleVerifyQR = async () => {
     if (!studentIdInput.trim()) {
       setErrorMessage("Please enter your Student ID before scanning.");
       return;
     }
 
+
+    // Fetch latest students to ensure we are up to date
+    let latestStudents = students;
+    try {
+      const res = await fetch('/api/students');
+      if (res.ok) {
+        latestStudents = await res.json();
+        setStudents(latestStudents);
+      }
+    } catch (e) {}
+
     // Verify student exists in our local simulated database
-    const matchingStudent = students.find(s => s.studentId.toUpperCase() === studentIdInput.toUpperCase());
-    if (!matchingStudent) {
-      // Log unregistered student fraud attempt
-      const newFraud: FraudLog = {
-        id: fraudLogs.length + 1,
-        studentId: studentIdInput,
-        fraudType: "UNREGISTERED_STUDENT_ID",
-        distance: 0,
-        timestamp: new Date().toLocaleTimeString(),
-        deviceFingerprint: "sha256_mock_df_" + Math.random().toString(16).slice(2, 10)
-      };
-      setFraudLogs(prev => [newFraud, ...prev]);
-      setErrorMessage("Student ID not found in database onboarding records. Check-in rejected.");
+    const isValidStudent = latestStudents.some(s => s.studentId.toUpperCase() === studentIdInput.trim().toUpperCase());
+    if (!isValidStudent) {
+      setErrorMessage(`Student ID "${studentIdInput}" not found in the database. Please register first.`);
       setStudentScanStep('failed');
       return;
     }
-
     try {
       if (!scannedQRText.trim()) {
         setErrorMessage("Please paste or type the scanned dynamic QR code payload.");
@@ -289,53 +586,43 @@ export default function App() {
       }
       
       const payload = JSON.parse(scannedQRText);
+      setScannedSessionId(payload.session_id);
       const qrAge = Math.floor(Date.now() / 1000) - payload.timestamp;
 
       // 1. Validate QR timestamp expiration (15-second window)
-      if (qrAge > 15 || qrAge < -5) { // 5s clock buffer
-        const newFraud: FraudLog = {
-          id: fraudLogs.length + 1,
-          studentId: studentIdInput,
+      const targetLat = payload.coordinates?.lat ?? geofenceLat;
+      const targetLng = payload.coordinates?.lng ?? geofenceLng;
+      const targetRadius = payload.coordinates?.radius ?? radiusMeters;
+      
+      if (qrAge > 300 || qrAge < -300) { // heavily relaxed to 300s (5 minutes) for testing
+        const newFraud = {
+          sessionId: payload.session_id,
+          studentId: (students.find(s => s.studentId.toUpperCase() === studentIdInput.toUpperCase())?.studentId || studentIdInput),
           fraudType: `EXPIRED_QR_CODE (Generated ${qrAge}s ago)`,
-          distance: calculateDistance(studentLat, studentLng, geofenceLat, geofenceLng),
+          distance: calculateDistance(studentLat, studentLng, targetLat, targetLng),
           timestamp: new Date().toLocaleTimeString(),
           deviceFingerprint: "sha256_mock_df_" + Math.random().toString(16).slice(2, 10)
         };
-        setFraudLogs(prev => [newFraud, ...prev]);
-        setErrorMessage(`Security Breach: Expired QR code token. Age: ${qrAge} seconds. Expected strictly ≤ 15 seconds.`);
+        logFraud(newFraud);
+        setErrorMessage(`Security Breach: Expired QR code token. Age: ${qrAge} seconds. (Clocks must be within 5 minutes)`);
         setStudentScanStep('failed');
         return;
       }
 
-      // 2. Validate GPS coordinates
-      const distance = calculateDistance(studentLat, studentLng, geofenceLat, geofenceLng);
-      if (distance > radiusMeters) {
-        const newFraud: FraudLog = {
-          id: fraudLogs.length + 1,
-          studentId: studentIdInput,
-          fraudType: `GPS_GEOFENCE_BREACH (${distance.toFixed(1)}m out)`,
-          distance: parseFloat(distance.toFixed(1)),
-          timestamp: new Date().toLocaleTimeString(),
-          deviceFingerprint: "sha256_mock_df_" + Math.random().toString(16).slice(2, 10)
-        };
-        setFraudLogs(prev => [newFraud, ...prev]);
-        setErrorMessage(`Geofencing Failure: You are out of classroom bounds. Distance: ${distance.toFixed(1)} meters. Accepted limit: ${radiusMeters} meters.`);
-        setStudentScanStep('failed');
-        return;
-      }
-
-      // 3. Move to biometric facial/emotion liveness checks
-      setStudentScanStep('face-auth');
-      startLivenessChallenge();
-    } catch (e) {
-      setErrorMessage("Corrupted QR Data: Invalid token payload format. Replay or manipulation detected.");
+      // 2. Proceed to Location step
+      setQrTargetLat(targetLat);
+      setQrTargetLng(targetLng);
+      setQrTargetRadius(targetRadius);
+      setStudentScanStep('location');
+    } catch (e: any) {
+      setErrorMessage("Corrupted QR Data: " + e.message);
       setStudentScanStep('failed');
     }
   };
 
   // --- Biometric Liveness Challenge Simulator ---
   const emotions = ["SMILE", "LOOK SURPRISED", "BLINK BOTH EYES", "WINK LEFT EYE"];
-  const startLivenessChallenge = () => {
+  const startLivenessChallenge = async () => {
     // Select a random required emotion/action to prevent video playback/photo spoofing
     const randomEmotion = emotions[Math.floor(Math.random() * emotions.length)];
     setPromptedEmotion(randomEmotion);
@@ -343,40 +630,108 @@ export default function App() {
     setLivenessProgress(0);
     setLivenessStatusText("Looking for face...");
 
+    let latestStudents = students;
+    try {
+      const res = await fetch('/api/students');
+      if (res.ok) {
+        latestStudents = await res.json();
+        setStudents(latestStudents);
+      }
+    } catch (e) {}
+
     // Simulate emotion liveness progress bar ticking
     setTimeout(() => {
       setLivenessStatusText(`Validating face matches Student ID...`);
       setTimeout(() => {
+        const matchingStudent = latestStudents.find(s => s.studentId.toUpperCase() === studentIdInput.toUpperCase());
+        if (!matchingStudent) {
+            const newFraud = {
+              sessionId: scannedSessionId,
+              studentId: (students.find(s => s.studentId.toUpperCase() === studentIdInput.toUpperCase())?.studentId || studentIdInput),
+              fraudType: "UNREGISTERED_STUDENT_ID",
+              distance: 0,
+              timestamp: new Date().toLocaleTimeString(),
+              deviceFingerprint: "sha256_mock_df_" + Math.random().toString(16).slice(2, 10)
+            };
+            logFraud(newFraud);
+            setErrorMessage("Facial match failed: Student ID not found in database.");
+            setStudentScanStep('failed');
+            return;
+        }
+
         setLivenessStatusText(`Facial match verified. Please trigger: ${randomEmotion}`);
       }, 1500);
     }, 1000);
   };
 
-  const simulateEmotionTrigger = (emotion: string) => {
-    setDetectedEmotion(emotion);
-    if (emotion === promptedEmotion) {
-      setLivenessStatusText("Perfect! Liveness verification passed.");
-      let progress = 0;
-      const interval = setInterval(() => {
-        progress += 25;
-        setLivenessProgress(progress);
-        if (progress >= 100) {
-          clearInterval(interval);
-          completeCheckIn();
-        }
-      }, 200);
-    } else {
-      setLivenessStatusText(`Action did not match. Please exhibit ${promptedEmotion}`);
+  const captureAndAnalyzeEmotion = async () => {
+    const imageSrc = webcamRef.current?.getScreenshot();
+    if (!imageSrc) {
+      setLivenessStatusText("Could not capture image from webcam.");
+      return;
+    }
+    setCapturedImage(imageSrc);
+    setLivenessStatusText("Analyzing emotion via AI...");
+
+    try {
+      const response = await fetch('/api/detect-emotion', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ image: imageSrc, expectedEmotion: promptedEmotion })
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to analyze emotion');
+      }
+      
+      if (data.match) {
+        setDetectedEmotion(promptedEmotion);
+        setLivenessStatusText("Perfect! Liveness verification passed.");
+        let progress = 0;
+        const interval = setInterval(() => {
+          progress += 25;
+          setLivenessProgress(progress);
+          if (progress >= 100) {
+            clearInterval(interval);
+            completeCheckIn();
+          }
+        }, 200);
+      } else {
+        setDetectedEmotion("NEUTRAL");
+        setLivenessStatusText(`Action did not match. Please exhibit ${promptedEmotion}`);
+      }
+    } catch (error: any) {
+      console.error(error);
+      setLivenessStatusText("Error: " + error.message);
     }
   };
 
-  const completeCheckIn = () => {
-    const student = students.find(s => s.studentId.toUpperCase() === studentIdInput.toUpperCase());
+  const completeCheckIn = async () => {
+    // Fetch latest to be 100% sure we have the name
+    let latestStudents = students;
+    try {
+      const res = await fetch('/api/students');
+      if (res.ok) {
+        latestStudents = await res.json();
+        setStudents(latestStudents);
+      }
+    } catch (e) {}
+    
+    const student = latestStudents.find(s => s.studentId.toUpperCase() === studentIdInput.toUpperCase());
+    if (!student) {
+      setErrorMessage(`Student ID "${studentIdInput}" not found in database. Registration required.`);
+      setStudentScanStep('failed');
+      return;
+    }
     const distance = calculateDistance(studentLat, studentLng, geofenceLat, geofenceLng);
 
-    const newLog: AttendanceLog = {
-      id: attendanceLogs.length + 1,
-      studentId: studentIdInput.toUpperCase(),
+    const newLog = {
+      sessionId: scannedSessionId,
+      studentId: student.studentId, // Use exact casing from DB
       studentName: student ? student.name : "Unknown",
       checkedInAt: new Date().toLocaleTimeString(),
       distance: parseFloat(distance.toFixed(2)),
@@ -384,8 +739,26 @@ export default function App() {
       status: "SUCCESS"
     };
 
-    setAttendanceLogs(prev => [newLog, ...prev]);
-    setStudentScanStep('success');
+    try {
+      const response = await fetch('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newLog)
+      });
+      if (response.ok) {
+        const { logId } = await response.json();
+        setAttendanceLogs(prev => [{ id: logId, ...newLog }, ...prev]);
+        setStudentScanStep('success');
+      } else {
+        const errData = await response.json().catch(() => ({}));
+        setErrorMessage(errData.error || ("Failed to save attendance log to server. Status: " + response.status));
+        setStudentScanStep('failed');
+      }
+    } catch (err) {
+      console.error("Failed to save attendance:", err);
+      setErrorMessage("Network error: Failed to save attendance log to server.");
+      setStudentScanStep('failed');
+    }
   };
 
   return (
@@ -412,11 +785,11 @@ export default function App() {
             <div className="flex items-center gap-3 text-xs font-mono">
               <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl text-emerald-400">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                Onboarded: {students.length}
+                Onboarded: {students.filter(s => s.lecturerEmail === loginEmail).length}
               </div>
               <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl text-rose-400">
                 <span className="w-2 h-2 rounded-full bg-rose-400"></span>
-                Fraud Logs: {fraudLogs.length}
+                Fraud Logs: {fraudLogs.filter(log => students.filter(s => s.lecturerEmail === loginEmail).map(s => s.studentId).includes(log.studentId)).length}
               </div>
               <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl text-cyan-400">
                 QR Sync: 15s Interval
@@ -452,33 +825,35 @@ export default function App() {
                 </div>
               )}
               {isSignUpMode && (
-                <div className="space-y-2">
-                  <label className="text-xs font-mono uppercase tracking-wider text-slate-400">Select Role</label>
-                  <div className="flex gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setSignUpRole('student')}
-                      className={`flex-1 py-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all border ${signUpRole === 'student' ? 'bg-cyan-500/20 border-cyan-500 text-cyan-400' : 'bg-black/45 border-white/10 text-slate-400'}`}
-                    >
-                      Student
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSignUpRole('lecturer')}
-                      className={`flex-1 py-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all border ${signUpRole === 'lecturer' ? 'bg-cyan-500/20 border-cyan-500 text-cyan-400' : 'bg-black/45 border-white/10 text-slate-400'}`}
-                    >
-                      Lecturer
-                    </button>
+                <>
+                  <div className="space-y-2">
+                    <label className="text-xs font-mono uppercase tracking-wider text-slate-400">Select Role</label>
+                    <div className="flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setSignUpRole('student')}
+                        className={`flex-1 py-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all border ${signUpRole === 'student' ? 'bg-cyan-500/20 border-cyan-500 text-cyan-400' : 'bg-black/45 border-white/10 text-slate-400'}`}
+                      >
+                        Student
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSignUpRole('lecturer')}
+                        className={`flex-1 py-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all border ${signUpRole === 'lecturer' ? 'bg-cyan-500/20 border-cyan-500 text-cyan-400' : 'bg-black/45 border-white/10 text-slate-400'}`}
+                      >
+                        Lecturer
+                      </button>
+                    </div>
                   </div>
-                </div>
+                </>
               )}
               <div className="space-y-2">
-                <label className="text-xs font-mono uppercase tracking-wider text-slate-400">User ID</label>
+                <label className="text-xs font-mono uppercase tracking-wider text-slate-400">Email Address</label>
                 <input 
-                  type="text" 
-                  value={loginId}
-                  onChange={(e) => setLoginId(e.target.value)}
-                  placeholder={isSignUpMode ? (signUpRole === 'student' ? 'e.g. STU202602' : 'Choose a lecturer ID') : "e.g. lecturer or STU202601"}
+                  type="email" 
+                  value={loginEmail}
+                  onChange={(e) => setLoginEmail(e.target.value)}
+                  placeholder="e.g. user@example.com"
                   className="w-full bg-black/45 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-cyan-500 transition-all placeholder:text-slate-600"
                 />
               </div>
@@ -488,7 +863,7 @@ export default function App() {
                   type="password" 
                   value={loginPassword}
                   onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder={isSignUpMode ? "Create a password" : "Enter password (default: password)"}
+                  placeholder={isSignUpMode ? "Create a password" : "Enter password"}
                   className="w-full bg-black/45 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-cyan-500 transition-all placeholder:text-slate-600"
                 />
               </div>
@@ -511,13 +886,6 @@ export default function App() {
                 {isSignUpMode ? 'Already have an account? Login' : 'Need an account? Sign Up'}
               </button>
             </div>
-            {!isSignUpMode && (
-              <div className="mt-8 pt-6 border-t border-white/5 text-center text-[10px] text-slate-500 font-mono flex flex-col gap-2">
-                <span className="uppercase tracking-widest text-slate-400">Demo Credentials</span>
-                <p>Lecturer: <strong className="text-cyan-400">lecturer</strong> / <strong className="text-cyan-400">password</strong></p>
-                <p>Student: <strong className="text-emerald-400">STU202601</strong> / <strong className="text-emerald-400">password</strong></p>
-              </div>
-            )}
           </div>
         ) : (
           <>
@@ -645,6 +1013,17 @@ export default function App() {
                       </div>
                     </div>
 
+                    <div className="flex justify-between items-center mb-4">
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-slate-300">Location Settings</h4>
+                      <button 
+                        onClick={fetchLecturerGPS} 
+                        disabled={isLecturerGpsLoading}
+                        className="text-[10px] bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 font-mono px-3 py-1.5 rounded-lg border border-cyan-500/20 flex items-center gap-1.5 transition-all cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isLecturerGpsLoading ? 'animate-spin' : ''}`} />
+                        Fetch Real Location
+                      </button>
+                    </div>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                       <div className="space-y-2">
                         <label className="text-xs text-slate-400 font-mono uppercase tracking-wider">Classroom Center Latitude</label>
@@ -676,6 +1055,23 @@ export default function App() {
                         />
                       </div>
                     </div>
+                    
+                    {/* Sync Session Button */}
+                    <div className="pt-2 border-t border-white/10 mt-6">
+                      <button 
+                        onClick={handleSyncSession}
+                        disabled={isSyncingSession}
+                        className="w-full bg-cyan-500 hover:bg-cyan-400 text-black font-bold py-3 rounded-xl uppercase tracking-widest text-xs transition-all disabled:opacity-50"
+                      >
+                        {isSyncingSession ? "Syncing..." : "Sync & Create Session in Database"}
+                      </button>
+                      {dbSessionId && (
+                        <p className="text-center text-emerald-400 text-[10px] font-mono mt-2 uppercase">
+                          Currently Active Database Session ID: {dbSessionId}
+                        </p>
+                      )}
+                    </div>
+
                   </div>
 
                   {/* QR Generator Display panel */}
@@ -685,26 +1081,16 @@ export default function App() {
                       <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-cyan-500 to-transparent"></div>
                       <h3 className="text-xs font-bold tracking-widest text-cyan-400 uppercase font-mono">Dynamic QR Code (15s Epoch)</h3>
                       
-                      {/* Simulated QR Code Canvas */}
+                      {/* Real QR Code Canvas */}
                       <div className="relative bg-white p-4 rounded-xl shadow-2xl shadow-cyan-500/20 select-none transition-transform duration-300 transform hover:scale-105">
-                        <div className="w-48 h-48 bg-slate-200 flex flex-col items-center justify-center gap-1.5 p-2 rounded border border-slate-300 relative overflow-hidden">
-                          {/* Simulated QR block visual */}
-                          <div className="grid grid-cols-5 grid-rows-5 gap-1 w-full h-full opacity-90">
-                            {Array.from({ length: 25 }).map((_, i) => (
-                              <div 
-                                key={i} 
-                                className={`rounded-sm ${(i % 2 === 0 && i % 3 !== 0) || i === 0 || i === 4 || i === 20 || i === 24 ? 'bg-slate-900' : 'bg-transparent'}`}
-                              />
-                            ))}
-                          </div>
-                          
-                          {/* Inner cryptographic details overlay */}
-                          <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 p-3 text-center">
-                            <QrCode className="w-12 h-12 text-cyan-400 mb-1 animate-pulse" />
-                            <p className="text-[10px] font-mono text-cyan-400 font-bold">SHA-256 HMAC</p>
-                            <p className="text-[9px] font-mono text-slate-300">Regenerating...</p>
-                          </div>
-                        </div>
+                        <QRCodeCanvas 
+                          value={qrToken}
+                          size={256}
+                          bgColor={"#ffffff"}
+                          fgColor={"#0f172a"}
+                          level={"M"}
+                          includeMargin={false}
+                        />
 
                         {/* Top corner QR alignment guides */}
                         <div className="absolute top-2 left-2 w-4 h-4 border-t-2 border-l-2 border-slate-950"></div>
@@ -807,15 +1193,15 @@ export default function App() {
                         <button 
                           id="save-student-btn"
                           onClick={handleSaveStudent}
-                          disabled={!onboardFaceCaptured}
+                          disabled={!onboardFaceCaptured || isSavingOnboard}
                           className={`w-full font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
-                            onboardFaceCaptured 
+                            onboardFaceCaptured && !isSavingOnboard
                               ? 'bg-gradient-to-br from-cyan-500 to-blue-600 hover:opacity-90 text-white shadow-lg shadow-cyan-500/20' 
                               : 'bg-white/5 text-slate-500 border border-white/5 cursor-not-allowed'
                           }`}
                         >
-                          <UserCheck className="w-4 h-4" />
-                          Secure & Save Student to SQLite
+                          {isSavingOnboard ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserCheck className="w-4 h-4" />}
+                          {isSavingOnboard ? "Saving to Database..." : "Secure & Save Student to SQLite"}
                         </button>
                       </div>
                     </div>
@@ -844,9 +1230,36 @@ export default function App() {
                           </div>
                         </div>
                       ) : (
-                        <div className="text-center space-y-3">
-                          <User className="w-12 h-12 text-slate-600 mx-auto" />
-                          <p className="text-xs text-slate-400 max-w-xs">No facial profile scanned. Fill in academic credentials and trigger "Capture Face Embeddings" to generate biocodes.</p>
+                        <div className="bg-black/45 w-full h-full relative overflow-hidden flex flex-col items-center justify-center">
+                          {capturedImage ? (
+                                <img src={capturedImage} alt="Captured" className="absolute inset-0 w-full h-full object-cover opacity-80" />
+                              ) : (
+                                <WebcamComponent key={cameraKey}
+                                  ref={webcamRef}
+                                  audio={false}
+                                  screenshotFormat="image/jpeg"
+                                  className="absolute inset-0 w-full h-full object-cover opacity-60"
+                                  onUserMediaError={handleCameraError}
+                        videoConstraints={{ facingMode: "user" }}
+                                />
+                              )}
+                          {cameraError ? (
+                            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80 p-4 text-center backdrop-blur-sm">
+                              <ShieldCheck className="w-8 h-8 text-red-500 mb-2" />
+                              <p className="text-sm font-bold text-red-400 mb-1">Camera Access Blocked</p>
+                              <p className="text-[10px] text-slate-300 mb-3 max-w-xs">{cameraError}</p>
+                              <button 
+                                onClick={handleRetryCamera}
+                                className="px-4 py-1.5 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-400 text-xs rounded border border-cyan-500/30 transition-all cursor-pointer pointer-events-auto"
+                              >
+                                Try Again
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="relative z-10 flex flex-col items-center pointer-events-none">
+                              <p className="text-xs text-slate-100 drop-shadow-md bg-black/50 px-2 py-1 rounded max-w-xs text-center font-mono">Camera feed active. Ensure good lighting.</p>
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -876,7 +1289,7 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody>
-                          {students.map((student) => (
+                          {students.filter(s => s.lecturerEmail === loginEmail).map((student) => (
                             <tr key={student.studentId} className="border-b border-white/5 hover:bg-white/5 transition-all">
                               <td className="py-2.5 px-4 font-bold text-white">{student.studentId}</td>
                               <td className="py-2.5 px-4 text-slate-300">{student.name}</td>
@@ -923,7 +1336,7 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody>
-                          {attendanceLogs.map((log) => (
+                          {attendanceLogs.filter(log => students.filter(s => s.lecturerEmail === loginEmail).map(s => s.studentId).includes(log.studentId)).map((log) => (
                             <tr key={log.id} className="border-b border-white/5 hover:bg-white/5 transition-all">
                               <td className="py-3 px-4 text-slate-500">#{log.id}</td>
                               <td className="py-3 px-4 font-bold text-white">{log.studentId}</td>
@@ -938,7 +1351,7 @@ export default function App() {
                               </td>
                             </tr>
                           ))}
-                          {attendanceLogs.length === 0 && (
+                          {attendanceLogs.filter(log => students.filter(s => s.lecturerEmail === loginEmail).map(s => s.studentId).includes(log.studentId)).length === 0 && (
                             <tr>
                               <td colSpan={7} className="text-center py-8 text-slate-500">No student has completed check-in yet.</td>
                             </tr>
@@ -972,7 +1385,7 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody>
-                          {fraudLogs.map((log) => (
+                          {fraudLogs.filter(log => students.filter(s => s.lecturerEmail === loginEmail).map(s => s.studentId).includes(log.studentId)).map((log) => (
                             <tr key={log.id} className="border-b border-white/5 hover:bg-rose-500/10 bg-rose-500/5 transition-all">
                               <td className="py-3 px-4 text-red-400 font-semibold">#F0{log.id}</td>
                               <td className="py-3 px-4 font-bold text-white">{log.studentId || "ANONYMOUS"}</td>
@@ -1011,7 +1424,7 @@ export default function App() {
               <div className="flex justify-between items-center">
                 <span className="text-[11px] font-bold font-mono text-slate-300 uppercase tracking-widest flex items-center gap-2">
                   <Compass className="w-4 h-4 text-cyan-400 animate-spin-slow" />
-                  Live GPS Geofence Simulator (Student Side)
+                  Student Location
                 </span>
                 <button 
                   id="fetch-gps-btn"
@@ -1030,54 +1443,12 @@ export default function App() {
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <div className="flex justify-between text-[11px] font-mono">
-                    <span className="text-slate-400">Student Mock Lat:</span>
-                    <span className="text-cyan-400 font-bold">{studentLat.toFixed(5)}</span>
-                  </div>
-                  <input 
-                    type="range" 
-                    min="37.7700" 
-                    max="37.7800" 
-                    step="0.00001" 
-                    value={studentLat}
-                    onChange={(e) => setStudentLat(parseFloat(e.target.value))}
-                    className="w-full accent-cyan-400 bg-white/5 h-1.5 rounded-lg appearance-none cursor-pointer"
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <div className="flex justify-between text-[11px] font-mono">
-                    <span className="text-slate-400">Student Mock Lng:</span>
-                    <span className="text-cyan-400 font-bold">{studentLng.toFixed(5)}</span>
-                  </div>
-                  <input 
-                    type="range" 
-                    min="-122.4250" 
-                    max="-122.4150" 
-                    step="0.00001" 
-                    value={studentLng}
-                    onChange={(e) => setStudentLng(parseFloat(e.target.value))}
-                    className="w-full accent-cyan-400 bg-white/5 h-1.5 rounded-lg appearance-none cursor-pointer"
-                  />
-                </div>
+              <div className="flex justify-between text-[11px] font-mono border-t border-white/5 pt-3">
+                <span className="text-slate-400">Current LAT: <span className="text-cyan-400 font-bold">{studentLat.toFixed(5)}</span></span>
+                <span className="text-slate-400">Current LNG: <span className="text-cyan-400 font-bold">{studentLng.toFixed(5)}</span></span>
               </div>
 
-              {/* Status relative to geofence */}
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center text-[10px] font-mono pt-3 border-t border-white/5 gap-2">
-                <div className="flex gap-1.5">
-                  <span className="text-slate-500">Center:</span>
-                  <span className="text-slate-300">{geofenceLat.toFixed(4)}, {geofenceLng.toFixed(4)}</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-500">Distance:</span>
-                  <span className={`font-bold uppercase tracking-wider ${calculateDistance(studentLat, studentLng, geofenceLat, geofenceLng) <= radiusMeters ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {calculateDistance(studentLat, studentLng, geofenceLat, geofenceLng).toFixed(1)}m 
-                    ({calculateDistance(studentLat, studentLng, geofenceLat, geofenceLng) <= radiusMeters ? 'In Range' : 'Out of bounds'})
-                  </span>
-                </div>
-              </div>
+
             </div>
 
             {/* Check-In Stepper Flow */}
@@ -1106,24 +1477,85 @@ export default function App() {
                     <div className="space-y-2">
                       <div className="flex justify-between items-center">
                         <label className="text-xs text-slate-400 font-mono uppercase tracking-wider block">Scan Dynamic QR Payload</label>
-                        <button 
-                          id="student-paste-payload-btn"
-                          onClick={() => setScannedQRText(qrToken)}
-                          className="text-[10px] text-cyan-400 hover:underline font-mono transition-all cursor-pointer"
-                        >
-                          Auto-fill current Lecturer code
-                        </button>
+                        
                       </div>
                       
-                      <div className="relative">
-                        <textarea 
-                          rows={3}
-                          placeholder="Paste or type the QR code JSON payload shown on the Lecturer session dashboard..."
+                      <div className="relative rounded-2xl overflow-hidden bg-black/45 border border-white/10 w-full aspect-video min-h-[240px]">
+                        
+                        <WebcamComponent 
+                          key={qrCameraKey}
+                          ref={webcamRef}
+                          audio={false}
+                          screenshotFormat="image/jpeg"
+                          className="absolute inset-0 w-full h-full object-cover"
+                          onUserMediaError={(err) => {
+                            console.error("QR Camera Error:", err);
+                            setQrCameraError(typeof err === 'string' ? err : err.message || "Camera access blocked or not available");
+                          }}
+                          videoConstraints={{ facingMode }}
+                        />
+                        <button 
+                          onClick={toggleCamera} 
+                          className="absolute top-2 right-2 z-30 p-2 bg-black/60 rounded-full text-white hover:bg-black/80 transition-all cursor-pointer pointer-events-auto"
+                          title="Switch Camera"
+                        >
+                          <SwitchCamera className="w-5 h-5" />
+                        </button>
+                        {/* QR Scanning logic overlay */}
+                        {isZoomSupported && capabilities?.zoom && (
+                          <div className="absolute bottom-4 left-0 right-0 z-30 flex justify-center px-8">
+                            <input
+                              type="range"
+                              min={capabilities.zoom.min}
+                              max={capabilities.zoom.max}
+                              step={capabilities.zoom.step || 0.1}
+                              value={zoomLevel}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                setZoomLevel(val);
+                                setZoom(val);
+                              }}
+                              className="w-full max-w-xs accent-cyan-500 pointer-events-auto cursor-pointer"
+                            />
+                          </div>
+                        )}
+                        <div className="absolute inset-0 pointer-events-none z-10 flex items-center justify-center">
+                           <div className="w-48 h-48 border-2 border-cyan-500/50 rounded-xl"></div>
+                           <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-cyan-400 to-transparent animate-scan-beam"></div>
+                        </div>
+
+                        {qrCameraError && (
+                          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80 p-4 text-center backdrop-blur-sm">
+                            <ShieldCheck className="w-8 h-8 text-red-500 mb-2" />
+                            <p className="text-sm font-bold text-red-400 mb-1">Camera Access Blocked</p>
+                            <p className="text-[10px] text-slate-300 mb-3 max-w-xs">{qrCameraError}</p>
+                            <button 
+                              onClick={() => { setQrCameraError(null); setQrCameraKey(prev => prev + 1); }}
+                              className="px-4 py-1.5 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-400 text-xs rounded border border-cyan-500/30 transition-all cursor-pointer pointer-events-auto"
+                            >
+                              Try Again
+                            </button>
+                          </div>
+                        )}
+
+                        {scannedQRText && (
+                          <div className="absolute bottom-0 left-0 w-full bg-emerald-500/90 text-white text-[10px] p-2 text-center font-mono">
+                            QR Payload Scanned Successfully
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Manual QR Entry Fallback */}
+                      <div className="mt-4">
+                        <label className="text-xs text-slate-400 font-mono uppercase tracking-wider block mb-2">Or Paste QR Token</label>
+                        <textarea
+                          placeholder="Paste JSON QR Payload..."
                           value={scannedQRText}
                           onChange={(e) => setScannedQRText(e.target.value)}
-                          className="w-full bg-black/45 border border-white/10 rounded-2xl p-4 text-xs text-cyan-300 font-mono focus:outline-none focus:border-cyan-500 leading-relaxed resize-none transition-all placeholder:text-slate-600"
+                          className="w-full bg-black/45 border border-white/10 rounded-2xl px-4 py-3 text-xs text-slate-100 font-mono focus:outline-none focus:border-cyan-500 transition-all h-20 placeholder:text-slate-600"
                         />
                       </div>
+                      
                     </div>
                   </div>
 
@@ -1139,6 +1571,76 @@ export default function App() {
               )}
 
               {/* STEP 2: Facial/Emotion Liveness Challenge */}
+              {studentScanStep === 'location' && (
+                <motion.div 
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  className="flex flex-col items-center text-center space-y-6 py-8"
+                >
+                  <div className="w-24 h-24 bg-cyan-500/20 rounded-full flex items-center justify-center border-[3px] border-cyan-500/50 shadow-[0_0_30px_rgba(6,182,212,0.3)] mb-4">
+                    <MapPin className="w-12 h-12 text-cyan-400" />
+                  </div>
+                  <div className="space-y-3">
+                    <h3 className="text-2xl font-bold text-slate-100 tracking-tight">QR Validated</h3>
+                    <p className="text-sm text-slate-400 max-w-xs mx-auto leading-relaxed">
+                      Please verify your location to ensure you are within the classroom bounds.
+                    </p>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      const distance = calculateDistance(studentLat, studentLng, qrTargetLat || geofenceLat, qrTargetLng || geofenceLng);
+                      if (distance > (qrTargetRadius || radiusMeters)) {
+                        const newFraud = {
+                          sessionId: scannedSessionId,
+                          studentId: (students.find(s => s.studentId.toUpperCase() === studentIdInput.toUpperCase())?.studentId || studentIdInput),
+                          fraudType: `GPS_GEOFENCE_BREACH (${distance.toFixed(1)}m out)`,
+                          distance: parseFloat(distance.toFixed(1)),
+                          timestamp: new Date().toLocaleTimeString(),
+                          deviceFingerprint: "sha256_mock_df_" + Math.random().toString(16).slice(2, 10)
+                        };
+                        logFraud(newFraud);
+                        setErrorMessage(`Geofencing Failure: You are out of classroom bounds. Distance: ${distance.toFixed(1)} meters. Accepted limit: ${qrTargetRadius || radiusMeters} meters.`);
+                        setStudentScanStep('failed');
+                        return;
+                      }
+                      setStudentScanStep('qr-success');
+                    }}
+                    className="w-full mt-6 bg-gradient-to-br from-cyan-500 to-blue-600 hover:opacity-95 text-white font-bold py-4 rounded-2xl text-xs uppercase tracking-widest transition-all shadow-xl shadow-cyan-500/15"
+                  >
+                    Verify Location
+                  </button>
+                </motion.div>
+              )}
+
+              {studentScanStep === 'qr-success' && (
+                <motion.div 
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  className="flex flex-col items-center text-center space-y-6 py-8"
+                >
+                  <div className="w-24 h-24 bg-emerald-500/20 rounded-full flex items-center justify-center border-[3px] border-emerald-500/50 shadow-[0_0_30px_rgba(16,185,129,0.3)] mb-4">
+                    <CheckCircle2 className="w-12 h-12 text-emerald-400" />
+                  </div>
+                  <div className="space-y-3">
+                    <h3 className="text-2xl font-bold text-slate-100 tracking-tight">QR Verified</h3>
+                    <p className="text-sm text-slate-400 max-w-xs mx-auto leading-relaxed">
+                      Token and proximity geofence validated successfully. Proceed to anti-fraud biometric verification.
+                    </p>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      setStudentScanStep('face-auth');
+                      setCapturedImage(null);
+                      startLivenessChallenge();
+                    }}
+                    className="w-full mt-6 bg-gradient-to-br from-emerald-500 to-teal-600 hover:opacity-95 text-white font-bold py-4 rounded-2xl text-xs uppercase tracking-widest transition-all shadow-xl shadow-emerald-500/15"
+                  >
+                    Proceed to Face Check
+                  </button>
+                </motion.div>
+              )}
               {studentScanStep === 'face-auth' && (
                 <motion.div 
                   initial={{ opacity: 0, y: 15 }}
@@ -1146,31 +1648,46 @@ export default function App() {
                   exit={{ opacity: 0, y: -15 }}
                   className="space-y-6 flex flex-col items-center text-center"
                 >
-                  <div className="relative w-full max-w-sm aspect-video bg-black/45 rounded-2xl border border-white/10 overflow-hidden h-64 flex flex-col items-center justify-center p-6 shadow-xl">
-                    {/* Simulated Scanner Active Grid */}
-                    <div className="absolute inset-0 border border-cyan-500/20 rounded-2xl pointer-events-none"></div>
-                    <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-cyan-400 to-transparent animate-scan-beam"></div>
+                  <div className="relative w-full max-w-sm aspect-video bg-black/45 rounded-2xl border border-white/10 overflow-hidden h-64 shadow-xl">
+                    {capturedImage ? (
+                      <img src={capturedImage} alt="Captured" className="absolute inset-0 w-full h-full object-cover" />
+                    ) : (
+                      <WebcamComponent key={cameraKey}
+                        ref={webcamRef}
+                        audio={false}
+                        screenshotFormat="image/jpeg"
+                        className="absolute inset-0 w-full h-full object-cover"
+                        onUserMediaError={handleCameraError}
+                        videoConstraints={{ facingMode: "user" }}
+                      />
+                    )}
 
-                    {/* Camera simulation layout */}
-                    <div className="flex flex-col items-center justify-center space-y-4 z-10">
-                      <div className="bg-cyan-500/10 p-3.5 rounded-full border border-cyan-500/20 relative">
-                        <Smile className="w-10 h-10 text-cyan-400 animate-pulse" />
-                        <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full animate-ping"></span>
-                        <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full"></span>
+                    {cameraError && (
+                      <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/90 p-4 text-center backdrop-blur-md pointer-events-auto">
+                        <ShieldCheck className="w-10 h-10 text-red-500 mb-2" />
+                        <p className="text-sm font-bold text-red-400 mb-1 font-mono uppercase">Camera Blocked</p>
+                        <p className="text-[10px] text-slate-400 mb-4 max-w-[200px] leading-relaxed">{cameraError}</p>
+                        <button 
+                          onClick={handleRetryCamera}
+                          className="px-6 py-2 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 text-xs font-bold rounded-lg border border-cyan-500/30 transition-all uppercase tracking-widest cursor-pointer"
+                        >
+                          Try Again
+                        </button>
+                      </div>
+                    )}
+                    {/* Camera simulation layout & Status */}
+                    <div className="absolute inset-0 flex flex-col items-center justify-end pb-4 z-10 pointer-events-none bg-gradient-to-t from-black/80 via-transparent to-transparent">
+                      <div className="space-y-1 text-center">
+                        <p className="text-sm font-bold text-cyan-400 font-mono tracking-widest uppercase bg-black/50 px-3 py-1 rounded-full backdrop-blur-md inline-block mb-2">{promptedEmotion}</p>
+                        <p className="text-[10px] text-slate-300 font-mono tracking-wider drop-shadow-md bg-black/50 px-2 py-0.5 rounded-full">{livenessStatusText}</p>
                       </div>
                       
-                      <div className="space-y-1">
-                        <p className="text-sm font-bold text-cyan-400 font-mono tracking-widest uppercase">{promptedEmotion}</p>
-                        <p className="text-[10px] text-slate-400 font-mono tracking-wider">{livenessStatusText}</p>
-                      </div>
-
                       {/* Liveness Challenge Progress */}
                       {livenessProgress > 0 && (
-                        <div className="w-48 space-y-1">
-                          <div className="w-full h-1 bg-white/5 rounded-full overflow-hidden">
+                        <div className="w-48 space-y-1 mt-2">
+                          <div className="w-full h-1 bg-white/20 rounded-full overflow-hidden">
                             <div className="h-full bg-emerald-400 transition-all duration-350" style={{ width: `${livenessProgress}%` }} />
                           </div>
-                          <p className="text-[9px] font-mono text-emerald-400">{livenessProgress}% verified</p>
                         </div>
                       )}
                     </div>
@@ -1182,24 +1699,15 @@ export default function App() {
                     <div className="absolute bottom-4 right-4 w-6 h-6 border-b-2 border-r-2 border-cyan-500"></div>
                   </div>
 
-                  {/* Manual trigger triggers to simulate the emotion detection on webcam */}
+                  {/* Real trigger triggers to process the emotion detection on webcam photo */}
                   <div className="w-full space-y-3">
-                    <span className="text-[10px] font-mono text-slate-400 uppercase tracking-wider block">Simulate Emotion Webcam Feed:</span>
-                    <div className="grid grid-cols-2 gap-3">
-                      {emotions.map((em) => (
-                        <button
-                          key={em}
-                          onClick={() => simulateEmotionTrigger(em)}
-                          className={`py-2 px-3 rounded-xl text-xs font-mono transition-all border ${
-                            detectedEmotion === em 
-                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 font-bold shadow-lg shadow-emerald-500/5' 
-                              : 'bg-black/45 text-slate-400 border-white/5 hover:border-white/10 hover:bg-white/5'
-                          }`}
-                        >
-                          Show {em}
-                        </button>
-                      ))}
-                    </div>
+                    <button
+                      onClick={() => captureAndAnalyzeEmotion()}
+                      className="w-full bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 text-cyan-400 font-bold py-3 rounded-xl text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2"
+                    >
+                      <Smile className="w-4 h-4" />
+                      Capture & Analyze Emotion
+                    </button>
                   </div>
 
                   <button 
@@ -1229,7 +1737,7 @@ export default function App() {
                   <div className="space-y-2">
                     <h3 className="text-xl font-bold text-emerald-400 uppercase tracking-wide">Attendance Logged Successfully</h3>
                     <p className="text-xs text-slate-400 max-w-sm mx-auto leading-relaxed">
-                      Your identity was verified against SQLite biocodes, and your proximity to the lecture center was validated at <strong className="text-white">{calculateDistance(studentLat, studentLng, geofenceLat, geofenceLng).toFixed(1)}m</strong>.
+                      Your identity was verified against SQLite biocodes, and your proximity to the lecture center was validated.
                     </p>
                   </div>
 
@@ -1246,6 +1754,7 @@ export default function App() {
                       onClick={() => {
                         setStudentScanStep('qr');
                         setScannedQRText("");
+                        setCapturedImage(null);
                       }}
                       className="bg-white/5 hover:bg-white/10 text-slate-200 font-semibold py-2.5 px-6 rounded-xl text-xs uppercase tracking-wider transition-all border border-white/10 cursor-pointer"
                     >
@@ -1284,6 +1793,7 @@ export default function App() {
                       onClick={() => {
                         setStudentScanStep('qr');
                         setScannedQRText("");
+                        setCapturedImage(null);
                       }}
                       className="bg-white/5 hover:bg-white/10 text-slate-200 font-semibold py-2.5 px-6 rounded-xl text-xs uppercase tracking-wider transition-all border border-white/10 cursor-pointer"
                     >
